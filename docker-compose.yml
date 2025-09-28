@@ -1,0 +1,13 @@
+services:
+  app:
+    build: ./app
+    container_name: ai-trend-streamlit
+    env_file:
+      - .env
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data/cache:/data/cache
+    environment:
+      - TZ=${TZ:-Asia/Tokyo}
+    command: ["streamlit", "run", "streamlit_app.py", "--server.port=8501", "--browser.gatherUsageStats=false"]

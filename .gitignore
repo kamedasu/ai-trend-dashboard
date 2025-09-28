@@ -1,0 +1,38 @@
+# ---- Python / Streamlit ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.cache/
+.venv/
+venv/
+
+# ---- Local & OS ----
+.DS_Store
+Thumbs.db
+*.log
+
+# ---- Env / Secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- App data (cache) ----
+data/cache/*.json
+
+# ---- Node/Frontend (念のため残す) ----
+node_modules/
+frontend/
+**/node_modules/
+**/dist/
+
+# ---- Editor / IDE ----
+.vscode/
+.idea/
+*.swp
+
+# ---- Docker / Build artifacts ----
+*.bak
+*.tmp
+
