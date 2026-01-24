@@ -1,6 +1,6 @@
 services:
   app:
-    build: ./app
+    build: .
     container_name: ai-trend-streamlit
     env_file:
       - .env
