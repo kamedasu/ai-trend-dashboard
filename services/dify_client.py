@@ -21,7 +21,6 @@ class DifyClient:
         # デバッグ用フラグ（環境変数 DIFY_DEBUG=1 でON）
         self.debug = os.getenv("DIFY_DEBUG", "1") == "1"
 
-    # --- 内部ログ用 ---
     def _log(self, msg: str) -> None:
         if self.debug:
             print(f"[DifyClient] {msg}", flush=True)
@@ -31,20 +30,25 @@ class DifyClient:
         inputs: Dict[str, Any] | None = None,
         user: str = "demo",
     ) -> Dict[str, Any]:
+        """
+        Dify Workflow を streaming mode で実行し、
+        workflow_finished イベントの outputs を返す。
+        """
         url = f"{self.base_url}/v1/workflows/run"
         masked_key = f"{self.api_key[:6]}...{self.api_key[-4:]}" if self.api_key else "None"
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            "Accept": "text/event-stream",
         }
+
         payload: Dict[str, Any] = {
             "inputs": inputs or {},
-            "response_mode": "blocking",
+            "response_mode": "streaming",
             "user": user,
         }
 
-        # 送信前ログ
         self._log(f"POST {url}")
         self._log(f"Authorization: Bearer {masked_key}")
         self._log(f"Request payload: {json.dumps(payload, ensure_ascii=False)}")
@@ -56,51 +60,96 @@ class DifyClient:
             pool=10.0,
         )
 
+        last_event: Dict[str, Any] | None = None
+
         try:
             with httpx.Client(timeout=timeout) as client:
-                resp = client.post(url, headers=headers, json=payload)
+                with client.stream("POST", url, headers=headers, json=payload) as resp:
+                    self._log(f"HTTP status: {resp.status_code}")
+
+                    try:
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as e:
+                        # エラー時は本文も確認する
+                        try:
+                            error_body = resp.read().decode("utf-8", errors="replace")
+                        except Exception:
+                            error_body = "<failed to read error body>"
+                        self._log(f"HTTPStatusError body: {error_body[:2000]}")
+                        raise e
+
+                    for line in resp.iter_lines():
+                        if not line:
+                            continue
+
+                        # httpx のバージョンや環境によって bytes の可能性もあるため吸収
+                        if isinstance(line, bytes):
+                            line = line.decode("utf-8", errors="replace")
+
+                        # Dify の SSE は data: {...} 形式
+                        if not line.startswith("data:"):
+                            continue
+
+                        data_str = line[len("data:"):].strip()
+                        if not data_str or data_str == "[DONE]":
+                            continue
+
+                        try:
+                            event = json.loads(data_str)
+                        except Exception:
+                            self._log(f"Failed to parse SSE line: {data_str[:500]}")
+                            continue
+
+                        last_event = event
+                        event_name = event.get("event")
+                        self._log(f"SSE event: {event_name}")
+
+                        # 失敗イベント
+                        if event_name in ("workflow_failed", "error"):
+                            self._log(
+                                f"Workflow failed event: {json.dumps(event, ensure_ascii=False)[:2000]}"
+                            )
+                            raise RuntimeError(f"Dify workflow failed: {event}")
+
+                        # 完了イベント
+                        if event_name == "workflow_finished":
+                            self._log(
+                                f"workflow_finished: {json.dumps(event, ensure_ascii=False)[:2000]}"
+                            )
+
+                            data = event.get("data")
+
+                            # Dify streaming の典型:
+                            # {
+                            #   "event": "workflow_finished",
+                            #   "data": {
+                            #     "outputs": {
+                            #       "tech": [...],
+                            #       "side": [...],
+                            #       "qiita": [...]
+                            #     }
+                            #   }
+                            # }
+                            if isinstance(data, dict):
+                                outputs = data.get("outputs")
+                                if isinstance(outputs, dict):
+                                    return outputs
+
+                            # 念のため別構造にも対応
+                            outputs = event.get("outputs")
+                            if isinstance(outputs, dict):
+                                return outputs
+
+                            # outputs がない場合は data 全体を返す
+                            if isinstance(data, dict):
+                                return data
+
+                            return {}
+
         except httpx.RequestError as e:
             self._log(f"RequestError: {repr(e)}")
             raise
 
-        self._log(f"HTTP status: {resp.status_code}")
-        # レスポンス本文（長すぎると困るので先頭2,000文字だけ）
-        try:
-            body_text = resp.text
-        except Exception:
-            body_text = "<resp.text 取得失敗>"
-        self._log(f"Raw response text: {body_text[:2000]}")
-
-        # ステータス異常ならここで例外＋ログ
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            self._log(f"HTTPStatusError: {repr(e)}")
-            raise
-
-        # JSONパース
-        try:
-            data = resp.json()
-        except Exception as e:
-            self._log(f"JSON decode error: {repr(e)}")
-            raise
-
-        self._log(f"Parsed JSON: {json.dumps(data, ensure_ascii=False)[:2000]}")
-
-        # いろいろなレスポンスパターンを吸収
-        if isinstance(data, dict):
-            # Dify workflow の典型: {"data":{"outputs":{...}}}
-            if "data" in data and isinstance(data["data"], dict):
-                inner = data["data"]
-                if "outputs" in inner and isinstance(inner["outputs"], dict):
-                    self._log("Returning data['data']['outputs']")
-                    return inner["outputs"]
-                self._log("Returning data['data']")
-                return inner
-            # もしくは {"outputs":{...}}
-            if "outputs" in data and isinstance(data["outputs"], dict):
-                self._log("Returning data['outputs']")
-                return data["outputs"]
-
-        self._log("Returning raw data as-is (unexpected structure)")
-        return data
+        # workflow_finished が来ないまま終了した場合
+        self._log(f"Stream ended without workflow_finished. last_event={last_event}")
+        raise RuntimeError("Dify stream ended without workflow_finished event.")
