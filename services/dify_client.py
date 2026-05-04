@@ -49,8 +49,15 @@ class DifyClient:
         self._log(f"Authorization: Bearer {masked_key}")
         self._log(f"Request payload: {json.dumps(payload, ensure_ascii=False)}")
 
+        timeout = httpx.Timeout(
+            connect=10.0,
+            read=float(os.getenv("DIFY_READ_TIMEOUT", "300")),
+            write=30.0,
+            pool=10.0,
+        )
+
         try:
-            with httpx.Client(timeout=60) as client:
+            with httpx.Client(timeout=timeout) as client:
                 resp = client.post(url, headers=headers, json=payload)
         except httpx.RequestError as e:
             self._log(f"RequestError: {repr(e)}")
